@@ -37,6 +37,17 @@ GridTuple = collections.namedtuple("Grid", ["x", "q2", "flav", "grid"])
 AlphaTuple = collections.namedtuple("Alpha", ["q2", "grid"])
 
 
+def _same_grid_layout(reference, member):
+    if len(member) != len(reference):
+        return False
+    for first, current in zip(reference, member):
+        if not (np.array_equal(first.x, current.x)
+                and np.array_equal(first.q2, current.q2)
+                and np.array_equal(first.flav, current.flav)):
+            return False
+    return True
+
+
 def _load_alphas(info_file):
     """
     Reads metadata from info file and retrieves a list of alphas subgrids
@@ -168,25 +179,17 @@ class PDF:
         else:
             logger.info("Loading %d members from %s", len(members), self.fname)
 
-        first_grids = None
-        shared_grid = len(members) > 1
-        for member_int in members:
-            grids = lhapdf_pdf.get_member_grids(member_int)
-            if first_grids is None:
-                first_grids = grids
-            elif shared_grid:
-                shared_grid = len(first_grids) == len(grids) and all(
-                    np.array_equal(a.x, b.x) and np.array_equal(a.q2, b.q2)
-                    and np.array_equal(a.flav, b.flav)
-                    for a, b in zip(first_grids, grids)
-                )
+        member_grids = [lhapdf_pdf.get_member_grids(i) for i in members]
+        for grids in member_grids:
             subgrids = [Subgrid(grid, i, len(grids)) for i, grid in enumerate(grids)]
             self.grids.append(subgrids)
-        # Corresponding subgrids can share knot lookups across member columns.
+
         self._packed_tables = []
-        if shared_grid:
-            for group in zip(*self.grids):
-                self._packed_tables.append(tf.concat([sg.padded_grid for sg in group], axis=1))
+        if len(members) > 1 and all(_same_grid_layout(member_grids[0], grids)
+                                    for grids in member_grids[1:]):
+            for subgrids in zip(*self.grids):
+                tables = [subgrid.padded_grid for subgrid in subgrids]
+                self._packed_tables.append(tf.concat(tables, axis=1))
         self.members = members
 
         # Get the flavour scheme from the info file
@@ -273,15 +276,16 @@ class PDF:
         size_a = tf.size(a_x, out_type=DTYPEINT)
         size_u = tf.size(u, out_type=DTYPEINT)
         if self._packed_tables:
-            n = self.nmembers
-            offsets = tf.range(n, dtype=DTYPEINT)[:, None]
-            shape = tf.stack([size_a, n * size_u])
-            res = tf.zeros(shape, dtype=DTYPE)
-            for sg, table in zip(self.grids[0], self._packed_tables):
-                stride = sg.padded_grid.shape[1]
-                columns = tf.reshape(offsets * stride + u, [-1])
-                res += sg(shape, a_q2, pids=columns, arr_x=a_x, table=table)
-            return tf.transpose(tf.reshape(res, [size_a, n, size_u]), [1, 0, 2])
+            member_indices = tf.range(self.nmembers, dtype=DTYPEINT)[:, None]
+            shape = tf.stack([size_a, self.nmembers * size_u])
+            result = tf.zeros(shape, dtype=DTYPE)
+            for subgrid, table in zip(self.grids[0], self._packed_tables):
+                # Each member occupies one block of flavour columns in the table.
+                flavours_per_member = subgrid.padded_grid.shape[1]
+                columns = tf.reshape(member_indices * flavours_per_member + u, [-1])
+                result += subgrid(shape, a_q2, pids=columns, arr_x=a_x, table=table)
+            point_member_flavour = tf.reshape(result, [size_a, self.nmembers, size_u])
+            return tf.transpose(point_member_flavour, [1, 0, 2])
 
         shape = tf.stack([size_a, size_u])
 
@@ -292,12 +296,9 @@ class PDF:
                 res += subgrid(shape, a_q2, pids=u, arr_x=a_x)
             all_res.append(res)
 
-        # This conditional is only seen once
-        # if there is only one member, it will always return the result directly
-        if len(self.grids) == 1:
-            return res
-        else:
-            return tf.stack(all_res)
+        if self.nmembers == 1:
+            return all_res[0]
+        return tf.stack(all_res)
 
     @tf.function(input_signature=[GRID_I, GRID_F, GRID_F])
     def xfxQ2(self, pid, a_x, a_q2):

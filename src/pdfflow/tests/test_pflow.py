@@ -122,3 +122,38 @@ def test_one_multi():
 
 if __name__ == "__main__":
     test_one_multi()
+
+
+def test_packed_threshold_and_flavor_order():
+    """Check member ordering, gluon aliases and extrapolation against singletons."""
+    run_eager(False)
+    members = [4, 0, 4]
+    pids = [21, -5, 1, 0, 5, 1]
+    x = [1e-10, 0.0005, 0.0005, 0.0005, 0.4]
+    q2 = [1.0, 22.0, 24.2064, 27.0, 1e12]
+    multi = mkPDFs(PDFNAME, members)
+    assert multi._packed_tables
+    reference = [mkPDFs(PDFNAME, [i]).py_xfxQ2(pids, x, q2) for i in members]
+    np.testing.assert_allclose(multi.py_xfxQ2(pids, x, q2), reference, atol=1e-13, rtol=1e-12)
+
+
+def test_different_member_knots(monkeypatch):
+    """An interior knot can differ even when subgrid sizes and bounds agree."""
+    from pdfflow.pflow import LHA_PDF
+
+    load = LHA_PDF.get_member_grids
+
+    def shifted_grid(self, member):
+        grids = load(self, member)
+        if member == 1:
+            for grid in grids:
+                grid.x = grid.x.copy()
+                grid.x[1] = (grid.x[0] + grid.x[1]) / 2
+        return grids
+
+    monkeypatch.setattr(LHA_PDF, "get_member_grids", shifted_grid)
+    multi = mkPDFs(PDFNAME, [1, 0])
+    assert not multi._packed_tables
+    args = ([21, 2], [1.3e-9, 0.0005], [22., 27.])
+    reference = [mkPDFs(PDFNAME, [i]).py_xfxQ2(*args) for i in [1, 0]]
+    np.testing.assert_allclose(multi.py_xfxQ2(*args), reference, atol=1e-13, rtol=1e-12)
