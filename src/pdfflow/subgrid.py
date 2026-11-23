@@ -162,7 +162,7 @@ class Subgrid(tf.Module):
         if compile_functions:
             self.fn_interpolation = tf.function(self.fn_interpolation, **compilation_options)
 
-    def __call__(self, shape, arr_q2, pids=None, arr_x=None):
+    def __call__(self, shape, arr_q2, pids=None, arr_x=None, table=None):
         if self.alpha_s:
             if pids is not None or arr_x is not None:
                 raise ValueError("alpha_s interpolation does not accept x-input or flavours")
@@ -177,7 +177,9 @@ class Subgrid(tf.Module):
                 self.padded_grid,
             )
         else:
-            padded_grid = tf.gather(self.padded_grid, pids, axis=-1, name=self.name_sg)
+            if table is None:
+                table = self.padded_grid
+            padded_grid = tf.gather(table, pids, axis=-1, name=self.name_sg)
             result = self.fn_interpolation(
                 shape,
                 arr_x,

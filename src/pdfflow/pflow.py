@@ -168,10 +168,25 @@ class PDF:
         else:
             logger.info("Loading %d members from %s", len(members), self.fname)
 
+        first_grids = None
+        shared_grid = len(members) > 1
         for member_int in members:
             grids = lhapdf_pdf.get_member_grids(member_int)
+            if first_grids is None:
+                first_grids = grids
+            elif shared_grid:
+                shared_grid = len(first_grids) == len(grids) and all(
+                    np.array_equal(a.x, b.x) and np.array_equal(a.q2, b.q2)
+                    and np.array_equal(a.flav, b.flav)
+                    for a, b in zip(first_grids, grids)
+                )
             subgrids = [Subgrid(grid, i, len(grids)) for i, grid in enumerate(grids)]
             self.grids.append(subgrids)
+        # Corresponding subgrids can share knot lookups across member columns.
+        self._packed_tables = []
+        if shared_grid:
+            for group in zip(*self.grids):
+                self._packed_tables.append(tf.concat([sg.padded_grid for sg in group], axis=1))
         self.members = members
 
         # Get the flavour scheme from the info file
@@ -257,6 +272,17 @@ class PDF:
 
         size_a = tf.size(a_x, out_type=DTYPEINT)
         size_u = tf.size(u, out_type=DTYPEINT)
+        if self._packed_tables:
+            n = self.nmembers
+            offsets = tf.range(n, dtype=DTYPEINT)[:, None]
+            shape = tf.stack([size_a, n * size_u])
+            res = tf.zeros(shape, dtype=DTYPE)
+            for sg, table in zip(self.grids[0], self._packed_tables):
+                stride = sg.padded_grid.shape[1]
+                columns = tf.reshape(offsets * stride + u, [-1])
+                res += sg(shape, a_q2, pids=columns, arr_x=a_x, table=table)
+            return tf.transpose(tf.reshape(res, [size_a, n, size_u]), [1, 0, 2])
+
         shape = tf.stack([size_a, size_u])
 
         all_res = []

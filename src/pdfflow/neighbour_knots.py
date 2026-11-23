@@ -54,28 +54,15 @@ def four_neighbour_knots(a_x, a_q2, padded_x, padded_q2, actual_values):
     x_id = tf.clip_by_value(x_id, tf.constant([0], dtype=DTYPEINT), s_x-3)
     q2_id = tf.clip_by_value(q2_id, tf.constant([0], dtype=DTYPEINT), s-3)
 
-    s_x = tf.size(padded_x, out_type=DTYPEINT)
-    s = tf.size(padded_q2, out_type=DTYPEINT)
-
-    x_id = tf.clip_by_value(x_id, tf.constant([0], dtype=DTYPEINT), s_x-3)
-    q2_id = tf.clip_by_value(q2_id, tf.constant([0], dtype=DTYPEINT), s-3)
-
     piu = tf.reshape(tf.range(-1, 3, dtype=DTYPEINT), (4, 1))
-    corn_x_id = tf.repeat(tf.reshape(x_id, (1, -1)), 4, axis=0) + piu
-    corn_q2_id = tf.repeat(tf.reshape(q2_id, (1, -1)), 4, axis=0) + piu
+    corn_x_id = x_id[None, :] + piu
+    corn_q2_id = q2_id[None, :] + piu
 
     corn_x = tf.gather(padded_x, corn_x_id, name="fnk_1")
     corn_q2 = tf.gather(padded_q2, corn_q2_id, name="fnk_2")
 
-
-    pdf_idx = tf.reshape(x_id * s + q2_id, (1, -1))
-
-    a = tf.repeat(pdf_idx - s, 4, axis=0) + piu
-    b = tf.repeat(pdf_idx, 4, axis=0) + piu
-    c = tf.repeat(pdf_idx + s, 4, axis=0) + piu
-    d = tf.repeat(pdf_idx + 2 * s, 4, axis=0) + piu
-
-    A_id = tf.stack([a, b, c, d])
+    # Row-major offsets for the Cartesian product of the four neighbouring knots.
+    A_id = corn_x_id[:, None, :] * s + corn_q2_id[None, :, :]
     A = tf.gather(actual_values, A_id, name="fnk_3")
 
     return x_id, q2_id, corn_x, corn_q2, A
