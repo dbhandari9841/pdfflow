@@ -157,3 +157,14 @@ def test_different_member_knots(monkeypatch):
     args = ([21, 2], [1.3e-9, 0.0005], [22., 27.])
     reference = [mkPDFs(PDFNAME, [i]).py_xfxQ2(*args) for i in [1, 0]]
     np.testing.assert_allclose(multi.py_xfxQ2(*args), reference, atol=1e-13, rtol=1e-12)
+
+
+def test_prepared_xfxQ2():
+    run_eager(False)
+    model = mkPDFs(PDFNAME, [4, 0, 4])
+    pid = int_me([21, -5, 0, 1, 1])
+    for xs, qs in [([0.0005] * 3, [27., 24.2064, 22.]), ([0.1], [27.]), ([1e-10], [1.])]:
+        x, q2 = float_me(xs), float_me(qs)
+        evaluate = model.prepare_xfxQ2(x, q2)
+        np.testing.assert_allclose(evaluate(pid), model.xfxQ2(pid, x, q2),
+                                   atol=1e-13, rtol=1e-12)

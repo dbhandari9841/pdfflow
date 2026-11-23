@@ -24,6 +24,7 @@ from lhapdf_management.pdfsets import PDF as LHA_PDF
 from pdfflow.configflow import DTYPE, DTYPEINT, int_me, izero, float_me, find_pdf_path
 import tensorflow as tf
 from pdfflow.subgrid import Subgrid
+from pdfflow.region_interpolator import interpolate
 
 # lhapdf gluon code
 PID_G = int_me(21)
@@ -300,6 +301,74 @@ class PDF:
             return all_res[0]
         return tf.stack(all_res)
 
+    def prepare_xfxQ2(self, x, q2):
+        """Prepare fixed coordinates in eager mode. The returned function takes PIDs."""
+        x, q2 = float_me(x), float_me(q2)
+        if x.shape.rank != 1 or x.shape != q2.shape:
+            raise ValueError("x and q2 must be vectors of equal length")
+
+        @tf.function(input_signature=[GRID_I])
+        def standard(pid):
+            return self.xfxQ2(pid, x, q2)
+
+        grids = self.grids[0]
+        if not self._packed_tables or len(grids) == 1 or not len(x):
+            return standard
+
+        lx, lq = tf.math.log(x), tf.math.log(q2)
+        regions = []
+        coverage = np.zeros(len(x), dtype=int)
+        for i, (grid, table) in enumerate(zip(grids, self._packed_tables)):
+            upper = lq <= grid.log_q2max if i == len(grids) - 1 else lq < grid.log_q2max
+            inside = (lx >= grid.log_xmin) & (lx <= grid.log_xmax) & (lq >= grid.log_q2min) & upper
+            mask = inside.numpy()
+            coverage += mask
+            rows = int_me(np.flatnonzero(mask))
+            if len(rows):
+                regions.append((grid, table, rows, tf.gather(lx, rows), tf.gather(lq, rows)))
+
+        # Queries requiring extrapolation use the ordinary PDFFlow implementation.
+        if not np.all(coverage == 1):
+            return standard
+
+        @tf.function(input_signature=[GRID_I])
+        def evaluate(pid):
+            flavours, order = self._flavour_indices(pid)
+            width = tf.size(flavours, out_type=DTYPEINT)
+            members = tf.range(self.nmembers, dtype=DTYPEINT)[:, None]
+            parts = []
+            for grid, table, rows, xs, qs in regions:
+                columns = tf.reshape(members * grid.padded_grid.shape[1] + flavours, [-1])
+                values = interpolate(xs, qs, grid.padded_x, grid.s_x, grid.padded_q2,
+                                     grid.s_q2, tf.gather(table, columns, axis=1))
+                if len(regions) > 1:
+                    values = tf.scatter_nd(rows[:, None], values, [len(x), self.nmembers * width])
+                parts.append(values)
+            values = tf.reshape(tf.add_n(parts), [len(x), self.nmembers, width])
+            return tf.squeeze(tf.gather(tf.transpose(values, [1, 0, 2]), order, axis=-1))
+
+        return evaluate
+
+    def _flavour_indices(self, pid):
+        # And ensure it is unique
+        # TODO maybe error if the user ask for the same pid twice or for a non-registered pid?
+        upid, user_idx = tf.unique(pid, out_idx=DTYPEINT)
+
+        # And return the positions in the flavor_scheme array
+        # if the flavours are sorted, do it the easy way
+        if self.flavors_sorted:
+            # Change the LHAPDF gluon number to 0
+            upid = tf.where(upid == PID_G, izero, upid)
+            pid_idx = self.flavor_shift + upid
+        else:
+            # Change 0 to the LHAPDF gluon pid: 21
+            upid = tf.where(upid == izero, PID_G, upid)
+            # TODO maybe it is better to digest the flavor_scheme on initialization and avoid this
+            upid = tf.expand_dims(upid, -1)
+            pid_idx = tf.cast(tf.where(tf.equal(self.flavor_scheme, upid))[:, 1], dtype=DTYPEINT)
+
+        return pid_idx, user_idx
+
     @tf.function(input_signature=[GRID_I, GRID_F, GRID_F])
     def xfxQ2(self, pid, a_x, a_q2):
         """
@@ -356,22 +425,7 @@ class PDF:
             # TODO: this error only shows up in EagerMode because otherwise it fails
             # before arriving due to the signature
 
-        # And ensure it is unique
-        # TODO maybe error if the user ask for the same pid twice or for a non-registered pid?
-        upid, user_idx = tf.unique(pid, out_idx=DTYPEINT)
-
-        # And return the positions in the flavor_scheme array
-        # if the flavours are sorted, do it the easy way
-        if self.flavors_sorted:
-            # Change the LHAPDF gluon number to 0
-            upid = tf.where(upid == PID_G, izero, upid)
-            pid_idx = self.flavor_shift + upid
-        else:
-            # Change 0 to the LHAPDF gluon pid: 21
-            upid = tf.where(upid == izero, PID_G, upid)
-            # TODO maybe it is better to digest the flavor_scheme on initialization and avoid this
-            upid = tf.expand_dims(upid, -1)
-            pid_idx = tf.cast(tf.where(tf.equal(self.flavor_scheme, upid))[:, 1], dtype=DTYPEINT)
+        pid_idx, user_idx = self._flavour_indices(pid)
 
         # Perform the actual computation
         f_f = self._xfxQ2(pid_idx, a_x, a_q2)
